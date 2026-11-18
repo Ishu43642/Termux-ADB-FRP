@@ -47,4 +47,13 @@ chmod +x FRP
 
 4. ♻️ Automatic Device chipset Selection 
 
+# Tool Usage Details - 
 
+1. Select option 1 to read Phone information ( allow usb Debugging window on phone) if tool exit then open again using this commond ```./FRP```
+
+2. A. select option 2 for root your device temporary using DF root & kernelsu Next, it's automatically install both app in you phone and automatic open DFROOT app then, select kernelsu under DFroot then klick launch its run some script after successful script inject Kernelsu app automatically open ( if DfRoot script failed then your device is not in supported)
+  B. Grant Adbd root parmission in kernelsu app settings then govback again to termux and hit enter it's automatically check Root & supported status.
+
+3. select option 3 For Remove FRP from connect device it's automatically check all functions then automatic detect Device CpU & Frp Partition then write frp file under your device
+
+4. option 4 is for restart adb server if device is stuck or not responding, Adb is not reworking then select this
