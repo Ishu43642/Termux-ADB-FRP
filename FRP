@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# Repair A2Z Tool - Linux ADB utility
+# Keep KernelSU.apk and DFRoot.apk beside this script for Option 2.
+set -Eeuo pipefail
+
+APP_NAME="Repair A2Z FRP Tool"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ADB="${ADB:-adb}"
+SERIAL=""
+TMP_REMOTE="/data/local/tmp"
+
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
+
+pause(){ read -r -p "Press Enter to continue..." _; }
+line(){ printf '%s\n' "------------------------------------------------------------"; }
+ok(){ printf '%s[OK]%s %s\n' "$GREEN" "$RESET" "$*"; }
+bad(){ printf '%s[FAIL]%s %s\n' "$RED" "$RESET" "$*"; }
+info(){ printf '%s[INFO]%s %s\n' "$CYAN" "$RESET" "$*"; }
+warn(){ printf '%s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*"; }
+
+need_adb(){
+    if ! command -v "$ADB" >/dev/null 2>&1; then
+        bad "ADB not found. Install Android platform-tools and ensure adb is in PATH."
+        return 1
+    fi
+}
+adb_cmd(){ "$ADB" ${SERIAL:+-s "$SERIAL"} "$@"; }
+
+choose_device(){
+    need_adb || return 1
+    "$ADB" start-server >/dev/null
+    mapfile -t devices < <("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')
+    if ((${#devices[@]} == 0)); then
+        bad "No authorized ADB device found. Check USB debugging and accept the RSA prompt."
+        return 1
+    elif ((${#devices[@]} == 1)); then
+        SERIAL="${devices[0]}"
+    else
+        echo "Multiple ADB devices found:"
+        local i
+        for i in "${!devices[@]}"; do printf "  %d) %s\n" "$((i+1))" "${devices[$i]}"; done
+        read -r -p "Select device number: " n
+        [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#devices[@]} )) || { bad "Invalid selection"; return 1; }
+        SERIAL="${devices[$((n-1))]}"
+    fi
+    ok "Selected device: $SERIAL"
+}
+
+getprop(){ adb_cmd shell "getprop $1" 2>/dev/null | tr -d '\r'; }
+remote(){ adb_cmd shell "$1" 2>/dev/null | tr -d '\r'; }
+
+read_info(){
+    choose_device || return 1
+    line; printf '%s%sDEVICE INFORMATION%s\n' "$BOLD" "$CYAN" "$RESET"; line
+    printf "%-22s %s\n" "Connected device" "$SERIAL"
+    printf "%-22s %s\n" "Serial number" "$(adb_cmd get-serialno 2>/dev/null | tr -d '\r')"
+    local -a props=(
+      "Brand:ro.product.brand"
+      "Manufacturer:ro.product.manufacturer"
+      "Model:ro.product.model"
+      "Codename:ro.product.device"
+      "Android Version:ro.build.version.release"
+      "SDK Version:ro.build.version.sdk"
+      "Bootloader:ro.bootloader"
+      "Security Patch:ro.build.version.security_patch"
+      "Platform:ro.board.platform"
+      "Hardware:ro.hardware"
+      "Chip Name:ro.hardware.chipname"
+      "CPU Manufacturer:ro.soc.manufacturer"
+      "CPU Model:ro.soc.model"
+      "MTK Platform:ro.mediatek.platform"
+      "Chip Name (ro.chipname):ro.chipname"
+    )
+    local item label prop value
+    for item in "${props[@]}"; do
+        label="${item%%:*}"; prop="${item#*:}"; value="$(getprop "$prop")"
+        [[ -n "$value" ]] || value="(empty / not provided)"
+        printf "%-22s %s\n" "$label" "$value"
+    done
+    line
+}
+
+
+install_apk(){
+    local filename="${1:-}"
+    local label="${2:-}"
+    local package_check="${3:-}"
+
+    local apk="$SCRIPT_DIR/$filename"
+
+    if [[ ! -f "$apk" ]]; then
+        bad "$filename not found in $SCRIPT_DIR"
+        return 1
+    fi
+
+    printf "\n%s%sCopying %s%s\n" "$BOLD" "$CYAN" "$label" "$RESET"
+
+    adb_cmd shell "pm list packages -3" || true
+
+    adb_cmd push "$apk" "$TMP_REMOTE/$filename" || {
+        bad "Failed to copy $filename"
+        return 1
+    }
+
+    local bytes
+    bytes="$(remote "wc -c < '$TMP_REMOTE/$filename'")"
+
+    [[ "$bytes" =~ ^[0-9]+$ ]] || {
+        bad "Could not verify copied APK size"
+        return 1
+    }
+
+    local local_bytes
+    local_bytes="$(wc -c < "$apk" | tr -d ' ')"
+
+    [[ "$bytes" == "$local_bytes" ]] || {
+        bad "APK size mismatch (local $local_bytes, device $bytes)"
+        return 1
+    }
+
+    printf "\n%sInstalling %s%s\n" "$BOLD" "$label" "$RESET"
+
+    adb_cmd shell pm install -r -g "$TMP_REMOTE/$filename" || {
+        bad "$label installation failed"
+        return 1
+    }
+
+    ok "$label installed"
+}
+
+temp_root(){
+    read_info || return 1
+    line
+    printf "%s%sInstalling Required Apps%s\n" "$BOLD" "$CYAN" "$RESET"
+    install_apk "KernelSU.apk" "KernelSU" || warn "KernelSU installation step did not complete."
+    install_apk "DFRoot.apk" "DFRoot" || warn "DFRoot installation step did not complete."
+
+    printf "\n%s%sLaunching DFRoot App%s\n" "$BOLD" "$CYAN" "$RESET"
+    adb_cmd shell "pm list packages -3" || true
+    adb_cmd shell monkey -p df.root -c android.intent.category.LAUNCHER 1 || warn "Could not launch package df.root."
+
+    line
+    printf "%s%sMANUAL ROOT SETUP REQUIRED%s\n" "$BOLD" "$YELLOW" "$RESET"
+    printf "\n%sPlease setup DFRoot & KernelSU root first, then hit Enter for next process.%s\n" "$BOLD" "$RESET"
+    printf "%sComplete the setup on your phone. Return here when finished.%s\n" "$CYAN" "$RESET"
+    read -r -p "Press Enter to continue with root checks..." _
+
+    line
+    printf "%s%sDevice Support / Root Status%s\n" "$BOLD" "$CYAN" "$RESET"
+    local v
+    v="$(adb_cmd get-state 2>/dev/null || true)"
+    [[ "$v" == "device" ]] && ok "Device: connected" || bad "Device: disconnected"
+    v="$(adb_cmd root 2>&1 || true)"; echo "ADB root: $v"
+    v="$(remote "id")"; echo "Shell identity: ${v:-empty}"
+    v="$(remote "which su 2>/dev/null")"
+    [[ -n "$v" ]] && ok "SU binary: $v" || bad "SU binary: Not Found"
+    v="$(remote "su -c id")"
+    [[ "$v" == *"uid=0"* ]] && ok "Superuser access: $v" || bad "Superuser access: ${v:-Access denied}"
+    v="$(getprop ro.debuggable)"
+    [[ "$v" == "1" ]] && ok "Debug support: 1" || bad "Debug support: ${v:-empty}"
+    v="$(getprop ro.secure)"
+    [[ "$v" == "0" ]] && ok "Secure mode: disabled (0)" || info "Secure mode: ${v:-empty} (1 normally means enabled)"
+    v="$(getprop service.adb.root)"
+    [[ "$v" == "1" ]] && ok "ADB root property: 1" || info "ADB root property: ${v:-empty}"
+    v="$(remote "ls /data/adb/ksu/bin/su 2>/dev/null")"
+    [[ -n "$v" ]] && ok "KernelSU binary: $v" || bad "KernelSU binary: Not Found"
+    v="$(remote "pm list packages -3 | grep -iE 'root|ksu|kernelsu|magisk|superuser' || true")"
+    if [[ -n "$v" ]]; then
+        ok "Possible superuser app(s):"
+        printf '%s\n' "$v" | sed 's/^/  /'
+    else
+        bad "Superuser app: Not found"
+    fi
+    warn "Installing these APKs does NOT itself guarantee temporary root. Root depends on device/kernel support and the app's own supported method."
+}
+
+classify_chip(){
+    local haystack
+    haystack="$(printf '%s ' "$(getprop ro.board.platform)" "$(getprop ro.hardware)" "$(getprop ro.hardware.chipname)" "$(getprop ro.soc.model)" "$(getprop ro.mediatek.platform)" "$(getprop ro.chipname)" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$haystack" =~ (exynos|universal|s5e) ]]; then echo "SamsungExynos"
+    elif [[ "$haystack" =~ (mt6|mt8|mtk|mediatek|helio|dimensity) ]]; then echo "Mediatek"
+    elif [[ "$haystack" =~ (qcom|qualcomm|snapdragon|msm|(^|[^a-z])sm[0-9]) ]]; then echo "Qualcomm"
+    elif [[ "$haystack" =~ (spd|unisoc|shark|ums|sprd) ]]; then echo "SPD/Unisoc"
+    else echo "Generic/Auto"
+    fi
+}
+
+partition_order(){
+    local manufacturer brand
+    manufacturer="$(getprop ro.product.manufacturer | tr '[:upper:]' '[:lower:]')"
+    brand="$(getprop ro.product.brand | tr '[:upper:]' '[:lower:]')"
+
+    # Samsung devices use the Samsung-specific search priority regardless of SoC.
+    if [[ "$manufacturer" == *samsung* || "$brand" == *samsung* ]]; then
+        printf '%s\n' persistent frp persist
+    else
+        case "$1" in
+          SPD/Unisoc) printf '%s\n' persist frp persistent ;;
+          *) printf '%s\n' frp persist persistent ;;
+        esac
+    fi
+}
+
+
+flash_script(){
+    choose_device || return 1
+    local chip; chip="$(classify_chip)"
+    line
+    printf "%sChip classification: %s%s\n" "$BOLD" "$chip" "$RESET"
+    echo "Partition probe order:"
+    mapfile -t order < <(partition_order "$chip")
+    printf '  %s\n' "${order[@]}"
+
+    local shell_id su_id
+    shell_id="$(remote id)"
+    su_id="$(remote "su -c id")"
+    if [[ "$su_id" != *"uid=0"* ]]; then
+        bad "Root shell unavailable. Flash option requires working su access (uid=0)."
+        echo "Normal shell: $shell_id"
+        echo "SU result: ${su_id:-empty}"
+        return 1
+    fi
+    ok "SU root access confirmed: $su_id"
+
+    echo
+    info "Available by-name partitions:"
+    remote "ls -al /dev/block/by-name/ 2>/dev/null" || true
+
+    local part="" name target
+    for name in "${order[@]}"; do
+        target="$(remote "readlink -f '/dev/block/by-name/$name'")"
+        if [[ -n "$target" && "$target" == /dev/block/* ]] &&
+           [[ "$(remote "su -c 'test -b \"$target\" && echo yes'")" == "yes" ]]; then
+            part="$target"
+            printf "${GREEN}FRP Partition: ${RESET}${RED}%s${RESET} -> ${YELLOW}%s${RESET}\n" "$name" "$part"
+            break
+        fi
+    done
+
+    if [[ -z "$part" ]]; then
+        bad "None of the preferred partitions were found. No write performed."
+        return 1
+    fi
+
+    echo
+    local IMAGE_NAME="frp.bin"
+    local image="$SCRIPT_DIR/$IMAGE_NAME"
+
+    warn "Writing FRP File Using This file: $image"
+    [[ -f "$image" ]] || {
+        bad "$IMAGE_NAME not found in the tool folder: $SCRIPT_DIR"
+        return 1
+    }
+
+    local local_size remote_size
+    local_size="$(wc -c < "$image" | tr -d ' ')"
+    remote_size="$(remote "su -c 'blockdev --getsize64 \"$part\"'")"
+
+    [[ "$remote_size" =~ ^[0-9]+$ ]] || {
+        bad "Could not read partition size"
+        return 1
+    }
+
+    if (( local_size > remote_size )); then
+        bad "Image ($local_size bytes) is larger than partition ($remote_size bytes)."
+        return 1
+    fi
+
+    echo "Image size:     $local_size bytes"
+    echo "Partition size: $remote_size bytes"
+    echo "Target:         $part"
+
+    echo
+    info "Restarting adbd with root permissions for direct block-device push..."
+
+    local root_msg adb_id
+    root_msg="$(adb_cmd root 2>&1 || true)"
+    printf '%s\n' "$root_msg"
+
+    adb_cmd wait-for-device
+    adb_id="$(remote id)"
+
+    if [[ "$adb_id" != *"uid=0"* ]]; then
+        bad "adbd is not running as root. Direct adb push to a block device is not permitted."
+        echo "ADB identity: ${adb_id:-empty}"
+        return 1
+    fi
+
+    ok "ADB root confirmed: $adb_id"
+
+    echo
+    printf "%s%sPushing image directly to block device: %s%s\n" "$RED" "$BOLD" "$part" "$RESET"
+
+    if adb_cmd push "$image" "$part"; then
+
+        ok "Direct block-device push completed."
+
+        warn "The partition has been written. Reboot only if you are sure the image and target partition are correct."
+
+        read -r -p "Reboot device now? [y/N]: " confirm
+
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+
+            info "Rebooting device..."
+
+            if adb_cmd reboot; then
+                ok "Reboot command sent."
+
+                info "Opening Repair A2Z YouTube Channel..."
+
+                if command -v xdg-open >/dev/null 2>&1; then
+                    xdg-open "https://youtube.com/@repaira2z" >/dev/null 2>&1 &
+                    ok "YouTube channel opening requested."
+                else
+                    warn "xdg-open not found. Install xdg-utils."
+                fi
+            else
+                bad "Reboot command failed."
+            fi
+
+        else
+            info "Device not rebooted."
+        fi
+
+    else
+        bad "Flash command failed. Do not reboot until you assess device state."
+        return 1
+    fi
+}
+
+main_menu(){
+    while true; do
+        clear 2>/dev/null || true
+
+        printf "%s\n" "${CYAN}=============================================${RESET}"
+        printf "                 %s\n" "$APP_NAME"
+        printf "                    Termux Edition\n"
+        printf "%s\n" "${CYAN}=============================================${RESET}"
+
+        echo "  1. Read Info"
+        echo "  2. Temp Root"
+        echo "  3. Bypass FRP"
+        echo "  4. Restart ADB"
+        echo "  0. Exit"
+
+        line
+
+        read -r -p "Select option: " choice
+
+        case "$choice" in
+          1) read_info; pause ;;
+          2) temp_root; pause ;;
+          3) flash_script; pause ;;
+          4) restart_adb; pause ;;
+          0) exit 0 ;;
+          *) warn "Invalid option"; pause ;;
+        esac
+    done
+}
+main_menu
