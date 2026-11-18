@@ -49,6 +49,8 @@ chmod +x FRP
 
 # Tool Usage Details - 
 
+  #Note Before Do anything you need to open Devloper option in your FRP Locked 🔒 Device also need to enable Usb Debugging on
+
 1. Select option 1 to read Phone information ( allow usb Debugging window on phone) if tool exit then open again using this commond ```./FRP```
 
 2. A. select option 2 for root your device temporary using DF root & kernelsu Next, it's automatically install both app in you phone and automatic open DFROOT app then, select kernelsu under DFroot then klick launch its run some script after successful script inject Kernelsu app automatically open ( if DfRoot script failed then your device is not in supported)
